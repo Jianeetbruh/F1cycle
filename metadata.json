@@ -1,0 +1,11 @@
+{
+  "name": "Society Grand Prix - F1 Cycling Race Hub",
+  "description": "Host an authentic Formula 1 style cycling race in your society with live team radio, timing tower, driver cockpit, pit wall strategy, and race control.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
