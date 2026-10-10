@@ -148,10 +148,16 @@ class SecurityEngine {
 
   unlockTeam(teamId: string, passcode: string): boolean {
     const cleanPass = passcode.trim();
+    if (cleanPass === MASTER_ORGANIZER_BYPASS) {
+      try {
+        sessionStorage.setItem(this.getStorageKey('team', teamId), 'unlocked');
+      } catch {}
+      return true;
+    }
     const config = TEAM_PASSCODES[teamId];
     if (!config) return false;
 
-    if (cleanPass === config.defaultPasscode || cleanPass === MASTER_ORGANIZER_BYPASS) {
+    if (cleanPass === config.defaultPasscode) {
       try {
         sessionStorage.setItem(this.getStorageKey('team', teamId), 'unlocked');
       } catch {}

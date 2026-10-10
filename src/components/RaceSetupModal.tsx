@@ -37,49 +37,6 @@ interface DriverSetupItem {
   photoUrl?: string;
 }
 
-const DEFAULT_SETUP_DRIVERS: DriverSetupItem[] = [
-  {
-    id: 'team-redbull',
-    name: 'Max Verstappen (Aarav)',
-    number: 1,
-    team: 'Red Bull Racing (Wing A)',
-    bikeType: 'Road Bike (Drop bar)',
-    color: '#3671C6',
-  },
-  {
-    id: 'team-ferrari',
-    name: 'Charles Leclerc (Kabir)',
-    number: 16,
-    team: 'Scuderia Ferrari (Wing B)',
-    bikeType: 'Aero Carbon Bike',
-    color: '#E80020',
-  },
-  {
-    id: 'team-mclaren',
-    name: 'Lando Norris (Rohan)',
-    number: 4,
-    team: 'McLaren F1 (Wing C)',
-    bikeType: 'Gravel / Hybrid',
-    color: '#FF8000',
-  },
-  {
-    id: 'team-mercedes',
-    name: 'Lewis Hamilton (Dev)',
-    number: 44,
-    team: 'Mercedes-AMG (Wing D)',
-    bikeType: 'Lightweight Road',
-    color: '#27F4D2',
-  },
-  {
-    id: 'team-aston',
-    name: 'Fernando Alonso (Aditya)',
-    number: 14,
-    team: 'Aston Martin (Clubhouse)',
-    bikeType: 'Single Speed / Track',
-    color: '#229971',
-  },
-];
-
 const PRESET_COLORS = ['#3671C6', '#E80020', '#FF8000', '#27F4D2', '#229971', '#900000', '#52E252', '#38bdf8'];
 
 export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
@@ -101,6 +58,7 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
   const [totalLaps, setTotalLaps] = useState<number>(12);
   const [practiceDurationMinutes, setPracticeDurationMinutes] = useState<number>(30);
   const [qualifyingDurationMinutes, setQualifyingDurationMinutes] = useState<number>(15);
+  const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
 
   // Drivers setup state
   const [drivers, setDrivers] = useState<DriverSetupItem[]>(() => {
@@ -115,7 +73,7 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
         photoUrl: d.photoUrl,
       }));
     }
-    return DEFAULT_SETUP_DRIVERS;
+    return [];
   });
 
   if (!isOpen) return null;
@@ -179,6 +137,11 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
   };
 
   const handleFinishLaunch = () => {
+    if (drivers.length === 0 || drivers.some(d => !d.name.trim() || !d.team.trim())) {
+      setBlockedMessage('Add at least one driver and complete every driver/team name before launching.');
+      setStep('DRIVERS_SETUP');
+      return;
+    }
     soundEffects.playFastestLapFanfare();
     const finalName = raceName.trim() || (isTestMode ? 'Metro Jazz Free Test' : 'Metro Jazz Grand Prix');
     radioEngine.createNewRace({
@@ -212,6 +175,11 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
               <p className="text-xs text-zinc-400 max-w-md mx-auto">
                 Would you like to resume the currently active session or initiate a new race event?
               </p>
+              {blockedMessage && (
+                <div className="bg-amber-950/60 border border-amber-700 text-amber-200 text-xs font-mono rounded-xl px-3 py-2 max-w-lg mx-auto">
+                  {blockedMessage}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -254,6 +222,10 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
               {/* Option 2: Make a New One */}
               <div
                 onClick={() => {
+                  if (raceState?.raceStatus === 'ACTIVE') {
+                    setBlockedMessage('The current race must finish before you can create another race.');
+                    return;
+                  }
                   soundEffects.playRadioChirp();
                   setStep('MODE');
                 }}
@@ -280,7 +252,7 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
                   type="button"
                   className="mt-4 w-full bg-red-600 hover:bg-red-500 text-white font-racing font-bold text-xs py-2.5 rounded-xl flex items-center justify-center gap-1.5 shadow-md transition-colors"
                 >
-                  <span>Configure New Race</span>
+                  <span>{raceState?.raceStatus === 'ACTIVE' ? 'Finish Current Race First' : 'Configure New Race'}</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -722,6 +694,10 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
               ))}
             </div>
 
+            {blockedMessage && (
+              <div className="bg-amber-950/60 border border-amber-700 text-amber-200 text-xs font-mono rounded-xl px-3 py-2">{blockedMessage}</div>
+            )}
+
             {/* Add Driver & Action Footer */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-zinc-800 shrink-0">
               <button
@@ -746,6 +722,10 @@ export const RaceSetupModal: React.FC<RaceSetupModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    if (drivers.length === 0 || drivers.some(d => !d.name.trim() || !d.team.trim())) {
+                      setBlockedMessage('Add at least one driver and complete every driver/team name before launch.');
+                      return;
+                    }
                     soundEffects.playRadioChirp();
                     setStep('START_POPUP');
                   }}

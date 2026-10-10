@@ -87,6 +87,11 @@ export default function App() {
   }, []);
 
   const flagStatus = raceState?.flagStatus || 'GREEN';
+  const rosterTeamLinks = (raceState?.drivers || []).map((driver) => ({
+    id: driver.id,
+    name: `${driver.team} #${driver.number}`,
+    color: driver.color,
+  }));
 
   const getStandaloneLink = (tabName: string, extraTeam?: string) => {
     const base = window.location.origin + window.location.pathname;
@@ -507,13 +512,7 @@ export default function App() {
                   </p>
 
                   <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 my-2">
-                    {[
-                      { id: 'team-redbull', name: 'Red Bull #1', color: '#3671C6' },
-                      { id: 'team-ferrari', name: 'Ferrari #16', color: '#E80020' },
-                      { id: 'team-mclaren', name: 'McLaren #4', color: '#FF8000' },
-                      { id: 'team-mercedes', name: 'Mercedes #44', color: '#27F4D2' },
-                      { id: 'team-aston', name: 'Aston Martin #14', color: '#229971' },
-                    ].map(t => (
+                    {rosterTeamLinks.map(t => (
                       <button
                         key={t.id}
                         onClick={() => copyToClipboard(getStandaloneLink('radio', t.id), `radio_${t.id}`)}
@@ -548,13 +547,7 @@ export default function App() {
                   </p>
 
                   <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 my-2">
-                    {[
-                      { id: 'team-redbull', name: 'Red Bull #1', color: '#3671C6' },
-                      { id: 'team-ferrari', name: 'Ferrari #16', color: '#E80020' },
-                      { id: 'team-mclaren', name: 'McLaren #4', color: '#FF8000' },
-                      { id: 'team-mercedes', name: 'Mercedes #44', color: '#27F4D2' },
-                      { id: 'team-aston', name: 'Aston Martin #14', color: '#229971' },
-                    ].map(t => (
+                    {rosterTeamLinks.map(t => (
                       <button
                         key={t.id}
                         onClick={() => copyToClipboard(getStandaloneLink('cockpit', t.id), `cockpit_${t.id}`)}

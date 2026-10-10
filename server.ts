@@ -143,6 +143,7 @@ export interface RaceState {
   raceName?: string;
   isTestMode?: boolean;
   raceFormat?: 'FULL_WEEKEND' | 'QUICK_RACE' | 'TEST';
+  raceStatus: 'IDLE' | 'ACTIVE' | 'FINISHED';
   lapLengthMeters: number;
   totalLaps: number;
   currentLap: number;
@@ -171,138 +172,7 @@ export interface RaceState {
   transcripts: RadioTranscript[];
 }
 
-const defaultDrivers: DriverState[] = [
-  {
-    id: 'team-redbull',
-    number: 1,
-    name: 'Max Verstappen (Aarav)',
-    team: 'Red Bull Racing (Wing A)',
-    color: '#3671C6',
-    bikeType: 'Road Bike (Drop bar)',
-    tyreCompound: 'SOFT',
-    lapsCompleted: 0,
-    currentLapTime: 0,
-    lastLapTime: null,
-    bestLapTime: null,
-    s1: null,
-    s2: null,
-    s3: null,
-    gap: 'LEADER',
-    interval: '-',
-    speedKmh: 0,
-    cadenceRpm: 0,
-    tyreWearPercent: 100,
-    pitStops: 0,
-    status: 'TRACK',
-    penaltySeconds: 0,
-    isDriverOnline: false,
-    isEngineerOnline: false,
-  },
-  {
-    id: 'team-ferrari',
-    number: 16,
-    name: 'Charles Leclerc (Kabir)',
-    team: 'Scuderia Ferrari (Wing B)',
-    color: '#E80020',
-    bikeType: 'Aero Road Bike',
-    tyreCompound: 'MEDIUM',
-    lapsCompleted: 0,
-    currentLapTime: 0,
-    lastLapTime: null,
-    bestLapTime: null,
-    s1: null,
-    s2: null,
-    s3: null,
-    gap: 'P2',
-    interval: '-',
-    speedKmh: 0,
-    cadenceRpm: 0,
-    tyreWearPercent: 100,
-    pitStops: 0,
-    status: 'TRACK',
-    penaltySeconds: 0,
-    isDriverOnline: false,
-    isEngineerOnline: false,
-  },
-  {
-    id: 'team-mclaren',
-    number: 4,
-    name: 'Lando Norris (Rohan)',
-    team: 'McLaren F1 (Wing C)',
-    color: '#FF8000',
-    bikeType: 'Gravel / Hybrid',
-    tyreCompound: 'MEDIUM',
-    lapsCompleted: 0,
-    currentLapTime: 0,
-    lastLapTime: null,
-    bestLapTime: null,
-    s1: null,
-    s2: null,
-    s3: null,
-    gap: 'P3',
-    interval: '-',
-    speedKmh: 0,
-    cadenceRpm: 0,
-    tyreWearPercent: 100,
-    pitStops: 0,
-    status: 'TRACK',
-    penaltySeconds: 0,
-    isDriverOnline: false,
-    isEngineerOnline: false,
-  },
-  {
-    id: 'team-mercedes',
-    number: 44,
-    name: 'Lewis Hamilton (Dev)',
-    team: 'Mercedes-AMG (Wing D)',
-    color: '#27F4D2',
-    bikeType: 'Lightweight Road',
-    tyreCompound: 'HARD',
-    lapsCompleted: 0,
-    currentLapTime: 0,
-    lastLapTime: null,
-    bestLapTime: null,
-    s1: null,
-    s2: null,
-    s3: null,
-    gap: 'P4',
-    interval: '-',
-    speedKmh: 0,
-    cadenceRpm: 0,
-    tyreWearPercent: 100,
-    pitStops: 0,
-    status: 'TRACK',
-    penaltySeconds: 0,
-    isDriverOnline: false,
-    isEngineerOnline: false,
-  },
-  {
-    id: 'team-aston',
-    number: 14,
-    name: 'Fernando Alonso (Aditya)',
-    team: 'Aston Martin (Clubhouse)',
-    color: '#229971',
-    bikeType: 'Single Speed / Track',
-    tyreCompound: 'MEDIUM',
-    lapsCompleted: 0,
-    currentLapTime: 0,
-    lastLapTime: null,
-    bestLapTime: null,
-    s1: null,
-    s2: null,
-    s3: null,
-    gap: 'P5',
-    interval: '-',
-    speedKmh: 0,
-    cadenceRpm: 0,
-    tyreWearPercent: 100,
-    pitStops: 0,
-    status: 'TRACK',
-    penaltySeconds: 0,
-    isDriverOnline: false,
-    isEngineerOnline: false,
-  },
-];
+const defaultDrivers: DriverState[] = [];
 
 const defaultCameras: CameraAngle[] = [
   {
@@ -364,6 +234,7 @@ function getOrCreateRoom(roomId: string = 'societygp'): RoomData {
         raceName: 'Metro Jazz Grand Prix',
         isTestMode: false,
         raceFormat: 'FULL_WEEKEND',
+        raceStatus: 'IDLE',
         lapLengthMeters: 480,
         totalLaps: 12,
         currentLap: 1,
@@ -394,10 +265,10 @@ function getOrCreateRoom(roomId: string = 'societygp'): RoomData {
         lapHistory: [],
         liveTimer: {
           isActive: false,
-          driverId: 'team-redbull',
-          driverName: 'Max Verstappen (Aarav)',
-          driverNumber: 1,
-          teamColor: '#3671C6',
+          driverId: '',
+          driverName: '',
+          driverNumber: 0,
+          teamColor: '#71717a',
           startTimestamp: null,
           currentElapsedMs: 0,
           s1Time: null,
@@ -421,19 +292,7 @@ function getOrCreateRoom(roomId: string = 'societygp'): RoomData {
           directorNote: 'RACE SESSION UNDERWAY • METRO JAZZ GRAND PRIX',
           activeRadioBanner: null,
         },
-        transcripts: [
-          {
-            id: 'trans-sample-1',
-            teamId: 'team-redbull',
-            senderRole: 'engineer',
-            senderName: 'GP (Engineer)',
-            driverNumber: 1,
-            teamColor: '#3671C6',
-            transcript: 'Max, track is clear. Prepare to open flying lap in 10 seconds.',
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            status: 'pending',
-          },
-        ],
+        transcripts: [],
       },
       clients: new Map(),
     });
@@ -629,6 +488,7 @@ wss.on('connection', (ws: WebSocket) => {
                 isRaceWinner = true;
                 room.raceState.flagStatus = 'CHEQUERED';
                 room.raceState.raceFinished = true;
+                room.raceState.raceStatus = 'FINISHED';
                 room.raceState.winner = {
                   id: drv.id,
                   name: drv.name,
@@ -1042,6 +902,10 @@ wss.on('connection', (ws: WebSocket) => {
 
         if (action === 'SET_FLAG') {
           room.raceState.flagStatus = payload.flag;
+          if (payload.flag === 'CHEQUERED') {
+            room.raceState.raceFinished = true;
+            room.raceState.raceStatus = 'FINISHED';
+          }
           if (payload.flag === 'SC') {
             room.raceState.safetyCarDeployed = true;
             room.raceState.vscDeployed = false;
@@ -1099,6 +963,7 @@ wss.on('connection', (ws: WebSocket) => {
             if (hasLeaderFinished && room.raceState.flagStatus !== 'CHEQUERED') {
               room.raceState.flagStatus = 'CHEQUERED';
               room.raceState.raceFinished = true;
+                room.raceState.raceStatus = 'FINISHED';
               const leader = room.raceState.drivers[0];
               room.raceState.winner = {
                 id: leader.id,
@@ -1238,6 +1103,7 @@ wss.on('connection', (ws: WebSocket) => {
                 isRaceWinner = true;
                 room.raceState.flagStatus = 'CHEQUERED';
                 room.raceState.raceFinished = true;
+                room.raceState.raceStatus = 'FINISHED';
                 room.raceState.winner = {
                   id: drv.id,
                   name: drv.name,
@@ -1519,6 +1385,14 @@ wss.on('connection', (ws: WebSocket) => {
 
         if (action === 'CREATE_NEW_RACE') {
           const { raceName, isTestMode, format, totalLaps, drivers } = payload;
+          if (room.raceState.raceStatus === 'ACTIVE') {
+            broadcastToRoom(room, {
+              type: 'race:action_rejected',
+              action,
+              reason: 'Finish the current race before creating another race.',
+            });
+            return;
+          }
           const laps = Math.max(1, parseInt(totalLaps, 10) || 12);
           const name = (raceName && raceName.trim()) || (isTestMode ? 'Metro Jazz Free Test' : 'Metro Jazz Grand Prix');
 
@@ -1526,6 +1400,7 @@ wss.on('connection', (ws: WebSocket) => {
           room.raceState.circuitName = 'Metro Jazz Circuit';
           room.raceState.isTestMode = !!isTestMode;
           room.raceState.raceFormat = format || (isTestMode ? 'TEST' : 'FULL_WEEKEND');
+          room.raceState.raceStatus = 'ACTIVE';
           room.raceState.totalLaps = laps;
           room.raceState.currentLap = 1;
           room.raceState.session = format === 'QUICK_RACE' ? 'RACE' : 'P1';
@@ -1664,6 +1539,8 @@ wss.on('connection', (ws: WebSocket) => {
           } else if (current === 'RACE') {
             nextSession = 'PODIUM';
             nextName = 'Podium & Trophy Ceremony';
+            room.raceState.raceFinished = true;
+                room.raceState.raceStatus = 'FINISHED';
           }
 
           room.raceState.session = nextSession;

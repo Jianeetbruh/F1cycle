@@ -114,6 +114,7 @@ export interface RaceState {
   raceName?: string;
   isTestMode?: boolean;
   raceFormat?: 'FULL_WEEKEND' | 'QUICK_RACE' | 'TEST';
+  raceStatus: 'IDLE' | 'ACTIVE' | 'FINISHED';
   lapLengthMeters: number;
   totalLaps: number;
   currentLap: number;
