@@ -5,4 +5,4 @@
 - Added authoritative `IDLE → ACTIVE → FINISHED` race status. The server rejects creation of another race while one is active. A chequered flag, race winner, or transition to the podium marks the race finished.
 - Race setup now explains why a new race is blocked and validates that every registered driver has a name and team.
 - Team Radio and Driver Cockpit links are generated from the current race roster. A three-driver race now produces exactly three team links in each section instead of five fixed links.
-- Custom roster teams can use organizer PIN `0000`; built-in team PINs remain unchanged.
+- Custom roster teams now receive private server-generated join codes; no PINs are embedded in the client.

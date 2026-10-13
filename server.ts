@@ -3,6 +3,17 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { fileURLToPath } from 'url';
+import {
+  allowAuthAttempt,
+  createPinHash,
+  createTeamJoinCode,
+  createSessionToken,
+  LocalRaceStore,
+  pinHashForRole,
+  type ServerRole,
+  verifyHashedPin,
+  verifySessionToken,
+} from './serverInfrastructure.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +23,54 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 app.use(express.json({ limit: '25mb' }));
+app.use((req, res, next) => {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || 'http://localhost:4173';
+  const origin = req.headers.origin;
+  if (origin === allowedOrigin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+const raceStore = new LocalRaceStore();
+let serverReady = false;
+const socketSessions = new WeakMap<WebSocket, { role: ServerRole; teamId: string }>();
+
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, ready: serverReady, persistence: raceStore.enabled ? 'local-file' : 'starting', timestamp: Date.now() });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const ip = req.ip || 'unknown';
+  if (!allowAuthAttempt(ip)) return res.status(429).json({ error: 'Too many authentication attempts. Try again later.' });
+  const role = req.body?.role as ServerRole;
+  const pin = String(req.body?.pin || '');
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const roomId = typeof req.body?.roomId === 'string' ? req.body.roomId : 'societygp';
+  if (!['admin', 'marshal', 'team'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  const sharedPinValid = verifyHashedPin(pin, pinHashForRole(role));
+  const teamCodeValid = role === 'team' && Boolean(teamId) && verifyHashedPin(pin, getOrCreateRoom(roomId).teamJoinCodeHashes[teamId]);
+  if (!sharedPinValid && !teamCodeValid) return res.status(401).json({ error: 'Access denied' });
+  return res.json({ token: createSessionToken(role, teamId), role, teamId });
+});
+
+// Public broadcast access is read-only but still receives a signed session token.
+app.post('/api/auth/spectator', (_req, res) => res.json({ token: createSessionToken('spectator') }));
+
+function requestToken(req: express.Request) {
+  const header = req.headers.authorization || '';
+  return header.startsWith('Bearer ') ? header.slice(7) : undefined;
+}
+
+function requireHttpRole(req: express.Request, res: express.Response, allowed: ServerRole[]) {
+  const session = verifySessionToken(requestToken(req));
+  if (!session || !allowed.includes(session.role)) {
+    res.status(401).json({ error: 'Valid role session required' });
+    return null;
+  }
+  return session;
+}
 
 // Video is always peer-to-peer. Optional free Metered Open Relay credentials
 // may be supplied as ICE_SERVERS_JSON; the server never relays media.
@@ -56,6 +115,12 @@ export interface DriverState {
   isDriverOnline: boolean;
   isEngineerOnline: boolean;
   photoUrl?: string;
+  gridPosition?: number;
+  finishPosition?: number;
+  championshipPoints?: number;
+  classified?: boolean;
+  dnfReason?: string;
+  qualifyingTimes?: number[];
 }
 
 export interface LiveTimerState {
@@ -170,6 +235,12 @@ export interface RaceState {
   cameras: CameraAngle[];
   production: StreamProduction;
   transcripts: RadioTranscript[];
+  gridLocked?: boolean;
+  qualifyingAttempts?: Record<string, number[]>;
+  stewardSignoff?: { signed: boolean; signedAt: string; signedBy: string; reason: string } | null;
+  raceDirectorLog?: Array<{ timestamp: string; role: string; action: string; reason?: string }>;
+  pointsStandings?: Array<{ driverId: string; name: string; team: string; points: number }>;
+  constructorsStandings?: Array<{ team: string; points: number }>;
 }
 
 const defaultDrivers: DriverState[] = [];
@@ -220,15 +291,18 @@ const defaultCameras: CameraAngle[] = [
 interface RoomData {
   id: string;
   raceState: RaceState;
+  teamJoinCodeHashes: Record<string, string>;
   clients: Map<string, { ws: WebSocket; role: string; teamId: string; name: string }>;
 }
 
 const rooms = new Map<string, RoomData>();
+const processedActionIds = new Set<string>();
 
 function getOrCreateRoom(roomId: string = 'societygp'): RoomData {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
       id: roomId,
+      teamJoinCodeHashes: {},
       raceState: {
         circuitName: 'Metro Jazz Circuit',
         raceName: 'Metro Jazz Grand Prix',
@@ -293,6 +367,12 @@ function getOrCreateRoom(roomId: string = 'societygp'): RoomData {
           activeRadioBanner: null,
         },
         transcripts: [],
+        gridLocked: false,
+        qualifyingAttempts: {},
+        stewardSignoff: null,
+        raceDirectorLog: [],
+        pointsStandings: [],
+        constructorsStandings: [],
       },
       clients: new Map(),
     });
@@ -306,9 +386,24 @@ app.get('/api/ice-servers', (_req, res) => {
 });
 
 app.get('/api/race-state', (req, res) => {
+  if (!requireHttpRole(req, res, ['spectator', 'team', 'marshal', 'admin'])) return;
   const roomId = (req.query.room as string) || 'societygp';
   const room = getOrCreateRoom(roomId);
   res.json(room.raceState);
+});
+
+app.get('/api/race-export', (req, res) => {
+  if (!requireHttpRole(req, res, ['admin'])) return;
+  const roomId = (req.query.room as string) || 'societygp';
+  const room = getOrCreateRoom(roomId);
+  if (req.query.format === 'csv') {
+    const columns = ['position', 'bib', 'driver', 'team', 'laps', 'bestLap', 'lastLap', 'status', 'penaltySeconds'];
+    const rows = room.raceState.drivers.map((driver, index) => [index + 1, driver.number, driver.name, driver.team, driver.lapsCompleted, driver.bestLapTime ?? '', driver.lastLapTime ?? '', driver.status, driver.penaltySeconds]);
+    const csv = [columns, ...rows].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
+    res.type('text/csv').setHeader('Content-Disposition', `attachment; filename="f1cycle-${roomId}-classification.csv"`).send(csv);
+    return;
+  }
+  res.type('application/json').setHeader('Content-Disposition', `attachment; filename="f1cycle-${roomId}-race.json"`).send(JSON.stringify(room.raceState, null, 2));
 });
 
 function broadcastToRoom(room: RoomData, message: object, excludeClientId?: string) {
@@ -329,6 +424,17 @@ function broadcastToTeam(room: RoomData, teamId: string, message: object, exclud
   }
 }
 
+function persistRoom(room: RoomData, action: string, role: string, reason?: string, clientActionId?: string) {
+  void raceStore.saveRace(room.id, room.raceState, action, role, reason, clientActionId);
+}
+
+async function issueTeamJoinCode(room: RoomData, teamId: string, ws: WebSocket, driverName: string) {
+  const code = createTeamJoinCode();
+  room.teamJoinCodeHashes[teamId] = createPinHash(code);
+  await raceStore.saveTeamJoinCodeHash(room.id, teamId, room.teamJoinCodeHashes[teamId]);
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'team:join_code', teamId, driverName, joinCode: code }));
+}
+
 // WebSocket Connection Handling
 wss.on('connection', (ws: WebSocket) => {
   const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -337,15 +443,22 @@ wss.on('connection', (ws: WebSocket) => {
   let clientTeamId = '';
   let clientName = 'Anonymous';
 
-  ws.on('message', (data: string) => {
+  ws.on('message', async (data: string) => {
     try {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'join') {
+        const session = verifySessionToken(msg.token);
+        if (!session) {
+          ws.send(JSON.stringify({ type: 'auth:error', message: 'Valid session token required' }));
+          ws.close(1008, 'Authentication required');
+          return;
+        }
         currentRoomId = msg.roomId || 'societygp';
-        clientRole = msg.role || 'spectator';
-        clientTeamId = msg.teamId || '';
+        clientRole = session.role;
+        clientTeamId = session.teamId || msg.teamId || '';
         clientName = msg.name || 'Participant';
+        socketSessions.set(ws, session);
 
         const room = getOrCreateRoom(currentRoomId);
         room.clients.set(clientId, { ws, role: clientRole, teamId: clientTeamId, name: clientName });
@@ -372,6 +485,36 @@ wss.on('connection', (ws: WebSocket) => {
       }
 
       const room = getOrCreateRoom(currentRoomId);
+      const session = socketSessions.get(ws);
+      if (!session) {
+        ws.send(JSON.stringify({ type: 'auth:error', message: 'Authenticate before sending messages' }));
+        return;
+      }
+      if (msg.clientActionId) {
+        if (await raceStore.hasAction(currentRoomId, msg.clientActionId)) return;
+        if (processedActionIds.has(msg.clientActionId)) return;
+        processedActionIds.add(msg.clientActionId);
+        if (processedActionIds.size > 10000) {
+          const oldest = processedActionIds.values().next().value as string | undefined;
+          if (oldest) processedActionIds.delete(oldest);
+        }
+      }
+      const allowedRoles: Record<string, ServerRole[]> = {
+        'timer:action': ['marshal', 'admin'],
+        'production:action': ['admin'],
+        'race:action': ['marshal', 'admin'],
+        'camera:frame_update': ['marshal', 'admin'],
+        'camera:update_info': ['marshal', 'admin'],
+        'camera:hazard_report': ['marshal', 'team', 'admin'],
+        'radio:transcript': ['team', 'admin'],
+        'radio:audio_clip': ['team', 'admin'],
+        'telemetry:live': ['team', 'marshal', 'admin'],
+      };
+      const permitted = allowedRoles[msg.type];
+      if (permitted && !permitted.includes(session.role)) {
+        ws.send(JSON.stringify({ type: 'action:rejected', action: msg.type, reason: 'Your role is not permitted to perform this action.' }));
+        return;
+      }
 
       // WebRTC Signaling (for video and audio peer connections)
       if (
@@ -464,6 +607,7 @@ wss.on('connection', (ws: WebSocket) => {
             if (room.raceState.session === 'RACE' && drv.lapsCompleted >= room.raceState.totalLaps) {
               drv.lapsCompleted = room.raceState.totalLaps;
               drv.status = 'FINISHED';
+              persistRoom(room, 'timer:finish-capped', socketSessions.get(ws)?.role || 'unknown');
               broadcastToRoom(room, { type: 'state:update', raceState: room.raceState });
               return;
             }
@@ -899,6 +1043,41 @@ wss.on('connection', (ws: WebSocket) => {
       // Race actions (Flags, sessions, penalties)
       if (msg.type === 'race:action') {
         const { action, payload } = msg;
+        if (!room.raceState.raceDirectorLog) room.raceState.raceDirectorLog = [];
+        room.raceState.raceDirectorLog.unshift({ timestamp: new Date().toISOString(), role: session.role, action, reason: payload?.reason || msg.reason });
+
+        if (action === 'LOCK_GRID') {
+          if (session.role !== 'admin') {
+            broadcastToRoom(room, { type: 'race:action_rejected', action, reason: 'Only Race Director/Admin can lock the starting grid.' });
+            return;
+          }
+          lockStartingGrid(room.raceState);
+          room.raceState.events.unshift({ id: `evt-grid-${Date.now()}`, timestamp: new Date().toISOString(), lap: room.raceState.currentLap, type: 'SYSTEM', message: 'Race Director locked the official starting grid.' });
+        }
+
+        if (action === 'MARK_DNF') {
+          const drv = room.raceState.drivers.find(d => d.id === payload?.driverId);
+          if (drv && payload?.reason) {
+            drv.status = 'DNF';
+            drv.dnfReason = String(payload.reason);
+            drv.classified = false;
+            room.raceState.events.unshift({ id: `evt-dnf-${Date.now()}`, timestamp: new Date().toISOString(), lap: drv.lapsCompleted, type: 'SYSTEM', message: `DNF: #${drv.number} ${drv.name}. Reason: ${drv.dnfReason}` });
+          }
+        }
+
+        if (action === 'SIGN_OFF_RESULTS') {
+          if (session.role !== 'admin' || room.raceState.raceStatus !== 'FINISHED') {
+            broadcastToRoom(room, { type: 'race:action_rejected', action, reason: 'Results can only be signed off by Race Director/Admin after the race is finished.' });
+            return;
+          }
+          if (!payload?.reason || String(payload.reason).trim().length < 3) {
+            broadcastToRoom(room, { type: 'race:action_rejected', action, reason: 'A sign-off note is required.' });
+            return;
+          }
+          updateOfficialClassification(room.raceState);
+          room.raceState.stewardSignoff = { signed: true, signedAt: new Date().toISOString(), signedBy: clientName, reason: String(payload.reason) };
+          room.raceState.events.unshift({ id: `evt-signoff-${Date.now()}`, timestamp: new Date().toISOString(), lap: room.raceState.currentLap, type: 'SYSTEM', message: `Official results signed off by ${clientName}.` });
+        }
 
         if (action === 'SET_FLAG') {
           room.raceState.flagStatus = payload.flag;
@@ -943,6 +1122,8 @@ wss.on('connection', (ws: WebSocket) => {
                 ? 'CHEQUERED FLAG • RACE FINISH'
                 : 'TRACK CLEAR • GREEN FLAG',
           });
+          updateOfficialClassification(room.raceState);
+          if (payload.flag === 'CHEQUERED') void raceStore.writeSnapshot(room.id, room.raceState, `race-end-${Date.now()}`);
         }
 
         if (action === 'SET_TOTAL_LAPS') {
@@ -1025,12 +1206,18 @@ wss.on('connection', (ws: WebSocket) => {
           const { driver } = payload;
           if (driver && !room.raceState.drivers.some(d => d.id === driver.id)) {
             room.raceState.drivers.push(driver);
+            await issueTeamJoinCode(room, driver.id, ws, driver.name);
             recalculateStandings(room.raceState);
           }
         }
 
         if (action === 'SET_SESSION') {
+          const previousSession = room.raceState.session;
           room.raceState.session = payload.session;
+          if (previousSession === 'Q1' && payload.session === 'RACE') {
+            lockStartingGrid(room.raceState);
+            void raceStore.writeSnapshot(room.id, room.raceState, `qualifying-end-${Date.now()}`);
+          }
         }
 
         if (action === 'TRIGGER_LIGHTS_STAGE') {
@@ -1126,6 +1313,13 @@ wss.on('connection', (ws: WebSocket) => {
             }
 
             const lapTime = lapTimeSec || +(Math.random() * 5 + 36.2).toFixed(3);
+            if (room.raceState.session === 'Q1') {
+              if (!room.raceState.qualifyingAttempts) room.raceState.qualifyingAttempts = {};
+              const attempts = room.raceState.qualifyingAttempts[drv.id] || [];
+              attempts.push(lapTime);
+              room.raceState.qualifyingAttempts[drv.id] = attempts.slice(-20);
+              drv.qualifyingTimes = room.raceState.qualifyingAttempts[drv.id];
+            }
             drv.lastLapTime = lapTime;
             if (!drv.bestLapTime || lapTime < drv.bestLapTime) {
               drv.bestLapTime = lapTime;
@@ -1204,6 +1398,7 @@ wss.on('connection', (ws: WebSocket) => {
             }
 
             recalculateStandings(room.raceState);
+            updateOfficialClassification(room.raceState);
 
             const newIndex = room.raceState.drivers.findIndex(d => d.id === driverId);
             if (newIndex < prevIndex) {
@@ -1309,9 +1504,15 @@ wss.on('connection', (ws: WebSocket) => {
           room.raceState.production.activeRadioBanner = null;
         }
 
-        // Race Director Invalidate / Remove Lap Time
-        if (action === 'REMOVE_LAP') {
-          const { driverId, lapRecordId } = payload;
+        // Race Director / Marshal invalidate or undo a result with a mandatory reason.
+        if (action === 'REMOVE_LAP' || action === 'UNDO_LAST_RESULT') {
+          if (!payload?.reason || String(payload.reason).trim().length < 3) {
+            broadcastToRoom(room, { type: 'race:action_rejected', action, reason: 'A reason is required for every undo or result edit.' });
+            return;
+          }
+          const undoRecord = action === 'UNDO_LAST_RESULT' ? room.raceState.lapHistory?.[0] : null;
+          const driverId = payload.driverId || undoRecord?.driverId;
+          const lapRecordId = payload.lapRecordId || undoRecord?.id;
           const drv = room.raceState.drivers.find(d => d.id === driverId);
           if (drv) {
             if (lapRecordId && room.raceState.lapHistory) {
@@ -1376,10 +1577,11 @@ wss.on('connection', (ws: WebSocket) => {
               timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
               lap: drv.lapsCompleted,
               type: 'SYSTEM',
-              message: `Race Director invalidated / removed lap time for #${drv.number} ${drv.name}. Laps completed: ${drv.lapsCompleted}.`,
+              message: `Result edit by ${session.role}: #${drv.number} ${drv.name}. Reason: ${payload.reason}. Laps completed: ${drv.lapsCompleted}.`,
             });
 
             recalculateStandings(room.raceState);
+            updateOfficialClassification(room.raceState);
           }
         }
 
@@ -1412,6 +1614,12 @@ wss.on('connection', (ws: WebSocket) => {
           room.raceState.sessionStartTime = Date.now();
           room.raceState.raceFinished = false;
           room.raceState.winner = null;
+          room.raceState.gridLocked = false;
+          room.raceState.qualifyingAttempts = {};
+          room.raceState.stewardSignoff = null;
+          room.raceState.raceDirectorLog = [];
+          room.raceState.pointsStandings = [];
+          room.raceState.constructorsStandings = [];
 
           // Fresh driver state (using custom drivers with uploaded photos if provided)
           if (Array.isArray(drivers) && drivers.length > 0) {
@@ -1443,6 +1651,7 @@ wss.on('connection', (ws: WebSocket) => {
               isEngineerOnline: false,
               photoUrl: d.photoUrl || undefined,
             }));
+            await Promise.all(room.raceState.drivers.map((driver) => issueTeamJoinCode(room, driver.id, ws, driver.name)));
           } else {
             room.raceState.drivers = JSON.parse(JSON.stringify(defaultDrivers));
           }
@@ -1588,6 +1797,10 @@ wss.on('connection', (ws: WebSocket) => {
           raceState: room.raceState,
         });
       }
+
+      if (!msg.type.startsWith('signal:') && !msg.type.startsWith('webrtc:') && msg.type !== 'camera:frame_update') {
+        persistRoom(room, msg.type, session.role, msg.reason, msg.clientActionId);
+      }
     } catch (err) {
       console.error('Error handling WS message:', err);
     }
@@ -1601,6 +1814,34 @@ wss.on('connection', (ws: WebSocket) => {
     }
   });
 });
+
+const OFFICIAL_POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
+
+function updateOfficialClassification(raceState: RaceState) {
+  if (!raceState.raceFinished && raceState.flagStatus !== 'CHEQUERED') return;
+  const ordered = [...raceState.drivers].sort((a, b) => {
+    if (a.status === 'DNF' && b.status !== 'DNF') return 1;
+    if (a.status !== 'DNF' && b.status === 'DNF') return -1;
+    if (b.lapsCompleted !== a.lapsCompleted) return b.lapsCompleted - a.lapsCompleted;
+    return (a.penaltySeconds || 0) - (b.penaltySeconds || 0);
+  });
+  const constructors = new Map<string, number>();
+  ordered.forEach((driver, index) => {
+    const classified = driver.status !== 'DNF' && (driver.lapsCompleted >= raceState.totalLaps || driver.status === 'FINISHED' || driver.lapsCompleted >= Math.ceil(raceState.totalLaps * 0.9));
+    driver.classified = classified;
+    driver.finishPosition = classified ? index + 1 : undefined;
+    driver.championshipPoints = classified ? (OFFICIAL_POINTS[index] || 0) : 0;
+    if (driver.championshipPoints) constructors.set(driver.team, (constructors.get(driver.team) || 0) + driver.championshipPoints);
+  });
+  raceState.pointsStandings = ordered.filter(d => d.classified).map(d => ({ driverId: d.id, name: d.name, team: d.team, points: d.championshipPoints || 0 }));
+  raceState.constructorsStandings = [...constructors.entries()].sort((a, b) => b[1] - a[1]).map(([team, points]) => ({ team, points }));
+}
+
+function lockStartingGrid(raceState: RaceState) {
+  raceState.drivers.sort((a, b) => (a.bestLapTime || Number.POSITIVE_INFINITY) - (b.bestLapTime || Number.POSITIVE_INFINITY));
+  raceState.drivers.forEach((driver, index) => { driver.gridPosition = index + 1; });
+  raceState.gridLocked = true;
+}
 
 function recalculateStandings(raceState: RaceState, preserveTrackOrder: boolean = false) {
   if (!preserveTrackOrder) {
@@ -1671,6 +1912,7 @@ setInterval(() => {
         type: 'state:update',
         raceState: room.raceState,
       });
+      persistRoom(room, 'session:tick', 'system');
     }
   }
 }, 1000);
@@ -1679,6 +1921,14 @@ const isProduction = process.env.NODE_ENV === 'production';
 const PORT = Number(process.env.PORT || 3000);
 
 async function startServer() {
+  await raceStore.initialize();
+  const persistedRace = await raceStore.loadRace('societygp');
+  if (persistedRace) {
+    getOrCreateRoom('societygp').raceState = persistedRace;
+    console.log('Loaded societygp race state from local persistence');
+  }
+  getOrCreateRoom('societygp').teamJoinCodeHashes = await raceStore.loadTeamJoinCodeHashes('societygp');
+
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -1695,6 +1945,7 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
+    serverReady = true;
     console.log(`f1Cycle Hub Server running at http://localhost:${PORT}`);
   });
 }

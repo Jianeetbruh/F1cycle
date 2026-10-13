@@ -38,7 +38,7 @@ import { RaceSetupModal } from './RaceSetupModal';
 import { PasscodeLockModal } from './PasscodeLockModal';
 
 export const RaceControlPortal: React.FC = () => {
-  // Official security passcode protection for Race Director (Passcode 9999 or master 0000)
+  // Official security passcode protection for Race Director
   const [isUnlocked, setIsUnlocked] = useState<boolean>(() => securityEngine.isStationUnlocked('control'));
   const [showSetupModal, setShowSetupModal] = useState<boolean>(false);
   const [raceState, setRaceState] = useState<RaceState | null>(radioEngine.currentRaceState);
@@ -49,6 +49,7 @@ export const RaceControlPortal: React.FC = () => {
   const [isDirectorMicActive, setIsDirectorMicActive] = useState<boolean>(false);
   const [hazardAlert, setHazardAlert] = useState<any | null>(null);
   const [calloutFeedback, setCalloutFeedback] = useState<string | null>(null);
+  const [joinCodeNotice, setJoinCodeNotice] = useState<{ driverName: string; joinCode: string } | null>(null);
 
   // New Driver Form state
   const [newDriverName, setNewDriverName] = useState<string>('');
@@ -80,10 +81,14 @@ export const RaceControlPortal: React.FC = () => {
     const unsubHazard = radioEngine.onTrackHazard((haz) => {
       setHazardAlert(haz);
     });
+    const unsubJoinCode = radioEngine.onTeamJoinCode((data) => {
+      setJoinCodeNotice({ driverName: data.driverName, joinCode: data.joinCode });
+    });
 
     return () => {
       unsub();
       unsubHazard();
+      unsubJoinCode();
     };
   }, [isUnlocked]);
 
@@ -191,6 +196,11 @@ export const RaceControlPortal: React.FC = () => {
     });
   };
 
+  const markDnf = (driverId: string, driverName: string) => {
+    const reason = window.prompt(`Reason for marking ${driverName} DNF:`);
+    if (reason && reason.trim().length >= 3) radioEngine.markDriverDnf(driverId, reason.trim());
+  };
+
   // Director Tap-to-Speak Radio (Click once to broadcast, click again to stop - NOT HOLD)
   const toggleDirectorRadio = async () => {
     if (isDirectorMicActive) {
@@ -214,7 +224,9 @@ export const RaceControlPortal: React.FC = () => {
   // Remove / Invalidate Lap Time
   const handleRemoveDriverLap = (driverId: string, lapRecordId?: string) => {
     soundEffects.playRadioChirp();
-    radioEngine.removeLapTime(driverId, lapRecordId);
+    const reason = window.prompt('Reason for invalidating this lap/result:');
+    if (!reason || reason.trim().length < 3) return;
+    radioEngine.removeLapTime(driverId, lapRecordId, reason.trim());
   };
 
   // Add new society rider
@@ -291,6 +303,15 @@ export const RaceControlPortal: React.FC = () => {
     }
   };
 
+  const lockStartingGrid = () => {
+    if (window.confirm('Lock the qualifying order as the official starting grid?')) radioEngine.lockStartingGrid();
+  };
+
+  const signOffResults = () => {
+    const reason = window.prompt('Steward sign-off note:');
+    if (reason && reason.trim().length >= 3) radioEngine.signOffResults(reason.trim());
+  };
+
   const handleLockStation = () => {
     securityEngine.lockStation('control');
     setIsUnlocked(false);
@@ -348,6 +369,12 @@ export const RaceControlPortal: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            {joinCodeNotice && (
+              <div className="bg-emerald-950 border border-emerald-700 text-emerald-200 text-xs font-mono px-3 py-2 rounded-xl">
+                TEAM CODE FOR {joinCodeNotice.driverName.toUpperCase()}: <strong>{joinCodeNotice.joinCode}</strong>
+                <button className="ml-2 underline" onClick={() => setJoinCodeNotice(null)}>DISMISS</button>
+              </div>
+            )}
             <button
               onClick={() => setShowSetupModal(true)}
               className="bg-red-600 hover:bg-red-500 text-white text-xs font-racing font-bold px-4 py-2 rounded-xl flex items-center gap-1.5 shadow-md shadow-red-950/50 transition-all active:scale-95"
@@ -362,6 +389,36 @@ export const RaceControlPortal: React.FC = () => {
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>RESET SESSION</span>
+            </button>
+
+            <button
+              onClick={lockStartingGrid}
+              disabled={Boolean(raceState?.gridLocked)}
+              className="bg-violet-900 hover:bg-violet-800 disabled:opacity-50 text-xs font-mono px-3.5 py-2 rounded-xl border border-violet-700 text-violet-100"
+            >
+              {raceState?.gridLocked ? 'GRID LOCKED' : 'LOCK STARTING GRID'}
+            </button>
+
+            <button
+              onClick={signOffResults}
+              disabled={raceState?.raceStatus !== 'FINISHED' || Boolean(raceState?.stewardSignoff?.signed)}
+              className="bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 text-xs font-mono px-3.5 py-2 rounded-xl border border-emerald-700 text-emerald-100"
+            >
+              {raceState?.stewardSignoff?.signed ? 'RESULTS SIGNED' : 'SIGN OFF RESULTS'}
+            </button>
+
+            <button
+              onClick={() => void radioEngine.exportRaceData('json')}
+              className="bg-cyan-900 hover:bg-cyan-800 text-xs font-mono px-3.5 py-2 rounded-xl border border-cyan-700 text-cyan-100 flex items-center gap-1.5"
+            >
+              <span>EXPORT JSON</span>
+            </button>
+
+            <button
+              onClick={() => void radioEngine.exportRaceData('csv')}
+              className="bg-cyan-900 hover:bg-cyan-800 text-xs font-mono px-3.5 py-2 rounded-xl border border-cyan-700 text-cyan-100 flex items-center gap-1.5"
+            >
+              <span>EXPORT CSV</span>
             </button>
 
             <button
@@ -1209,6 +1266,13 @@ export const RaceControlPortal: React.FC = () => {
                             className="bg-zinc-900 hover:bg-zinc-800 active:scale-95 text-yellow-300 font-mono text-xs py-2 px-2 rounded-xl border border-zinc-800 flex items-center justify-center gap-1"
                           >
                             <span>+5s PENALTY</span>
+                          </button>
+
+                          <button
+                            onClick={() => markDnf(driver.id, driver.name)}
+                            className="bg-red-950 hover:bg-red-900 active:scale-95 text-red-200 font-mono text-xs py-2 px-2 rounded-xl border border-red-800 flex items-center justify-center gap-1"
+                          >
+                            <span>MARK DNF</span>
                           </button>
                         </div>
                       </div>

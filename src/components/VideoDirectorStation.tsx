@@ -28,7 +28,7 @@ import { webrtcVideoEngine } from '../services/webrtcVideoEngine';
 import { PasscodeLockModal } from './PasscodeLockModal';
 
 export const VideoDirectorStation: React.FC = () => {
-  // Official security passcode protection for Video Director desk (Passcode 8888 or master 0000)
+  // Official security passcode protection for Video Director desk
   const [isUnlocked, setIsUnlocked] = useState<boolean>(() => securityEngine.isStationUnlocked('director'));
   const [raceState, setRaceState] = useState<RaceState | null>(radioEngine.currentRaceState);
   const [manualNote, setManualNote] = useState<string>('');

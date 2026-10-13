@@ -51,6 +51,7 @@ export default function App() {
   const [teamId, setTeamId] = useState<string>('team-redbull');
   const [raceState, setRaceState] = useState<RaceState | null>(radioEngine.currentRaceState);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [connectionState, setConnectionState] = useState<'connected' | 'reconnecting' | 'offline'>('offline');
   const [showAppsModal, setShowAppsModal] = useState<boolean>(false);
   const [copiedLink, setCopiedLink] = useState<string | null>(null);
 
@@ -78,7 +79,10 @@ export default function App() {
     if (teamParam) setTeamId(teamParam);
 
     const unsubState = radioEngine.onRaceState(setRaceState);
-    const unsubStatus = radioEngine.onStatus((connected) => setIsConnected(connected));
+    const unsubStatus = radioEngine.onStatus((connected, _peerOnline, state) => {
+      setIsConnected(connected);
+      setConnectionState(state || (connected ? 'connected' : 'offline'));
+    });
 
     return () => {
       unsubState();
@@ -132,9 +136,16 @@ export default function App() {
     </div>
   );
 
+  const renderConnectionBanner = () => connectionState === 'connected' ? null : (
+    <div className="fixed top-0 left-0 right-0 z-[70] bg-amber-950/95 border-b border-amber-700 text-amber-200 text-center text-xs font-mono py-2">
+      {connectionState === 'reconnecting' ? 'RECONNECTING… Your actions will sync when the connection returns.' : 'OFFLINE — waiting for the race server.'}
+    </div>
+  );
+
   if (activeTab === 'camera') {
     return (
       <>
+        {renderConnectionBanner()}
         {renderBackPill()}
         <FlagAlertOverlay />
         <CameraStation />
@@ -145,6 +156,7 @@ export default function App() {
   if (activeTab === 'timer') {
     return (
       <>
+        {renderConnectionBanner()}
         {renderBackPill()}
         <FlagAlertOverlay />
         <LapTimerStation />
@@ -155,6 +167,7 @@ export default function App() {
   if (activeTab === 'director') {
     return (
       <>
+        {renderConnectionBanner()}
         {renderBackPill()}
         <FlagAlertOverlay />
         <VideoDirectorStation />
@@ -165,6 +178,7 @@ export default function App() {
   if (activeTab === 'radio') {
     return (
       <>
+        {renderConnectionBanner()}
         {renderBackPill()}
         <FlagAlertOverlay />
         <PitWallPortal
@@ -179,6 +193,7 @@ export default function App() {
   if (activeTab === 'cockpit') {
     return (
       <>
+        {renderConnectionBanner()}
         {renderBackPill()}
         <FlagAlertOverlay />
         <DriverCockpit
@@ -193,6 +208,7 @@ export default function App() {
   if (activeTab === 'control') {
     return (
       <>
+        {renderConnectionBanner()}
         {renderBackPill()}
         <FlagAlertOverlay />
         <RaceControlPortal />
@@ -208,6 +224,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#07080c] text-zinc-100 flex flex-col font-sans">
+      {renderConnectionBanner()}
       <FlagAlertOverlay />
       {/* Top Main Stream Header */}
       <header className="bg-[#0b0d13] border-b border-[#1b1f2e] sticky top-0 z-40 backdrop-blur-md">

@@ -25,6 +25,7 @@ export const PasscodeLockModal: React.FC<PasscodeLockModalProps> = ({
   const [passcode, setPasscode] = useState<string>('');
   const [showPass, setShowPass] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   const stationConfig = type === 'station' ? STATION_PASSCODES[targetId] : null;
   const teamConfig = type === 'team' ? TEAM_PASSCODES[targetId] : null;
@@ -37,7 +38,7 @@ export const PasscodeLockModal: React.FC<PasscodeLockModalProps> = ({
     ? (stationConfig?.description || 'Official Credential Required')
     : `Secure Team Telemetry & Radio Channel (Car #${teamConfig?.number || '?'})`;
 
-  const handleSubmit = (e?: React.FormEvent) => {
+  const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     soundEffects.unlockAudio();
 
@@ -46,12 +47,11 @@ export const PasscodeLockModal: React.FC<PasscodeLockModalProps> = ({
       return;
     }
 
-    let success = false;
-    if (type === 'station') {
-      success = securityEngine.unlockStation(targetId, passcode);
-    } else {
-      success = securityEngine.unlockTeam(targetId, passcode);
-    }
+    setIsSubmitting(true);
+    const success = type === 'station'
+      ? await securityEngine.unlockStation(targetId, passcode)
+      : await securityEngine.unlockTeam(targetId, passcode);
+    setIsSubmitting(false);
 
     if (success) {
       soundEffects.playRadioChirp();
@@ -182,10 +182,11 @@ export const PasscodeLockModal: React.FC<PasscodeLockModalProps> = ({
           <div className="pt-1 space-y-2">
             <button
               type="submit"
+              disabled={isSubmitting}
               className="w-full bg-amber-500 hover:bg-amber-400 active:scale-95 text-black font-racing font-bold text-sm py-3 px-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-amber-950/50 transition-all cursor-pointer"
             >
               <Unlock className="w-4 h-4" />
-              <span>AUTHENTICATE & UNLOCK</span>
+              <span>{isSubmitting ? 'VERIFYING…' : 'AUTHENTICATE & UNLOCK'}</span>
             </button>
 
             <button

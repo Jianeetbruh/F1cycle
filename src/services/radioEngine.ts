@@ -1,5 +1,6 @@
 // f1Cycle Real-time Engine: Radio, Speech-to-Text, Timer & Camera Angles
 import { soundEffects } from '../utils/audioFx';
+import { getSpectatorToken, securityEngine } from '../utils/security';
 
 export interface DriverState {
   id: string;
@@ -27,6 +28,12 @@ export interface DriverState {
   isDriverOnline: boolean;
   isEngineerOnline: boolean;
   photoUrl?: string;
+  gridPosition?: number;
+  finishPosition?: number;
+  championshipPoints?: number;
+  classified?: boolean;
+  dnfReason?: string;
+  qualifyingTimes?: number[];
 }
 
 export interface LiveTimerState {
@@ -141,6 +148,12 @@ export interface RaceState {
   cameras: CameraAngle[];
   production: StreamProduction;
   transcripts: RadioTranscript[];
+  gridLocked?: boolean;
+  qualifyingAttempts?: Record<string, number[]>;
+  stewardSignoff?: { signed: boolean; signedAt: string; signedBy: string; reason: string } | null;
+  raceDirectorLog?: Array<{ timestamp: string; role: string; action: string; reason?: string }>;
+  pointsStandings?: Array<{ driverId: string; name: string; team: string; points: number }>;
+  constructorsStandings?: Array<{ team: string; points: number }>;
 }
 
 export interface RadioTransmission {
@@ -167,7 +180,7 @@ export const METERED_ICE_SERVERS: RTCIceServer[] = (() => {
 type StateListener = (state: RaceState) => void;
 type RadioListener = (transmission: RadioTransmission) => void;
 type PttListener = (isTalking: boolean, role: string, name: string) => void;
-type StatusListener = (connected: boolean, peerOnline: boolean) => void;
+type StatusListener = (connected: boolean, peerOnline: boolean, state?: 'connected' | 'reconnecting' | 'offline') => void;
 type FrameListener = (cameraId: string, frameDataUrl: string) => void;
 type FlagAlertListener = (flag: string, message: string, durationSec: number) => void;
 type LightsListener = (stage: number) => void;
@@ -225,6 +238,9 @@ class RadioEngine {
   private isConnected: boolean = false;
   private isPeerOnline: boolean = false;
   private isTalkingLocal: boolean = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: number | null = null;
+  private pendingActionKey = 'f1cycle_pending_marshal_actions';
   private iceServers: RTCIceServer[] = METERED_ICE_SERVERS;
 
   private stateListeners: Set<StateListener> = new Set();
@@ -241,6 +257,7 @@ class RadioEngine {
   private transcriptListeners: Set<TranscriptListener> = new Set();
   private hazardListeners: Set<(hazard: any) => void> = new Set();
   private rawMessageListeners: Set<(msg: any) => void> = new Set();
+  private teamJoinCodeListeners: Set<(data: { teamId: string; driverName: string; joinCode: string }) => void> = new Set();
 
   public currentRaceState: RaceState | null = null;
   public radioHistory: RadioTransmission[] = [];
@@ -275,7 +292,7 @@ class RadioEngine {
     }
   }
 
-  connect(roomId: string, role: string, teamId: string, name: string) {
+  async connect(roomId: string, role: string, teamId: string, name: string) {
     this.roomId = roomId || 'societygp';
     this.role = role;
     this.teamId = teamId;
@@ -294,13 +311,25 @@ class RadioEngine {
     const serverUrl = serverBase ? new URL(serverBase, window.location.origin) : new URL(window.location.origin);
     const protocol = serverUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${serverUrl.host}${serverUrl.pathname !== '/' ? serverUrl.pathname : ''}`;
+    const token = role === 'spectator'
+      ? await getSpectatorToken()
+      : (role === 'control' || role === 'director' || role === 'timer' || role === 'camera')
+        ? securityEngine.getStationToken(role)
+        : securityEngine.getTeamToken(teamId);
+    if (!token) {
+      console.warn('Cannot connect WebSocket without a valid server session token');
+      this.isConnected = false;
+      this.notifyStatus();
+      return;
+    }
 
     try {
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
+        this.reconnectAttempt = 0;
         this.isConnected = true;
-        this.notifyStatus();
+        this.notifyStatus('connected');
 
         this.send({
           type: 'join',
@@ -308,7 +337,9 @@ class RadioEngine {
           role: this.role,
           teamId: this.teamId,
           name: this.name,
+          token,
         });
+        this.flushPendingActions();
 
         this.initWebRTC();
       };
@@ -336,13 +367,16 @@ class RadioEngine {
       this.ws.onclose = () => {
         this.isConnected = false;
         this.isPeerOnline = false;
-        this.notifyStatus();
+        this.notifyStatus('reconnecting');
         this.cleanupWebRTC();
-        setTimeout(() => {
+        if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+        const delay = Math.min(30_000, 1_000 * (2 ** this.reconnectAttempt));
+        this.reconnectAttempt += 1;
+        this.reconnectTimer = window.setTimeout(() => {
           if (!this.isConnected) {
-            this.connect(this.roomId, this.role, this.teamId, this.name);
+            void this.connect(this.roomId, this.role, this.teamId, this.name);
           }
-        }, 3000);
+        }, delay);
       };
     } catch (e) {
       console.error('WS connection error:', e);
@@ -398,6 +432,10 @@ class RadioEngine {
     if (msg.type === 'state:update') {
       this.currentRaceState = msg.raceState;
       this.notifyState();
+    }
+
+    if (msg.type === 'team:join_code') {
+      this.teamJoinCodeListeners.forEach(listener => listener(msg));
     }
 
     if (msg.type === 'camera:frame_feed') {
@@ -848,11 +886,21 @@ class RadioEngine {
 
   // Race Control
   sendRaceAction(action: string, payload: any) {
-    this.send({
+    const message = {
       type: 'race:action',
       action,
       payload,
-    });
+      clientActionId: crypto.randomUUID(),
+      clientTimestamp: Date.now(),
+    };
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.send(message);
+    else if (this.role === 'timer' || this.role === 'camera') {
+      try {
+        const pending = JSON.parse(localStorage.getItem(this.pendingActionKey) || '[]');
+        pending.push(message);
+        localStorage.setItem(this.pendingActionKey, JSON.stringify(pending.slice(-100)));
+      } catch { /* local storage may be unavailable */ }
+    }
   }
 
   sendTelemetry(speedKmh: number, cadenceRpm: number) {
@@ -876,10 +924,15 @@ class RadioEngine {
     this.sendRaceAction('ADD_DRIVER', { driver });
   }
 
-  removeLapTime(driverId: string, lapRecordId?: string) {
+  removeLapTime(driverId: string, lapRecordId?: string, reason = 'Manual result correction') {
     soundEffects.playRadioChirp();
-    this.sendRaceAction('REMOVE_LAP', { driverId, lapRecordId });
+    this.sendRaceAction('REMOVE_LAP', { driverId, lapRecordId, reason });
   }
+
+  lockStartingGrid() { this.sendRaceAction('LOCK_GRID', {}); }
+  markDriverDnf(driverId: string, reason: string) { this.sendRaceAction('MARK_DNF', { driverId, reason }); }
+  signOffResults(reason: string) { this.sendRaceAction('SIGN_OFF_RESULTS', { reason }); }
+  undoLastResult(reason: string) { this.sendRaceAction('UNDO_LAST_RESULT', { reason }); }
 
   setTotalLaps(totalLaps: number) {
     this.sendRaceAction('SET_TOTAL_LAPS', { totalLaps });
@@ -899,17 +952,70 @@ class RadioEngine {
 
   startSessionTimer(durationMinutes?: number) {
     soundEffects.playRadioChirp();
+    this.updateSessionTimerLocally('START', durationMinutes);
     this.sendRaceAction('START_SESSION_TIMER', { durationMinutes });
   }
 
   pauseSessionTimer() {
     soundEffects.playRadioChirp();
+    this.updateSessionTimerLocally('PAUSE');
     this.sendRaceAction('PAUSE_SESSION_TIMER', {});
   }
 
   resetSessionTimer(durationMinutes?: number) {
     soundEffects.playRadioChirp();
+    this.updateSessionTimerLocally('RESET', durationMinutes);
     this.sendRaceAction('RESET_SESSION_TIMER', { durationMinutes });
+  }
+
+  async exportRaceData(format: 'json' | 'csv' = 'json') {
+    const configuredServer = new URLSearchParams(window.location.search).get('server');
+    const serverBase = configuredServer || (import.meta.env.VITE_SIGNAL_SERVER_URL as string | undefined);
+    const base = serverBase ? new URL(serverBase, window.location.origin).origin : window.location.origin;
+    const token = this.role === 'control' || this.role === 'director'
+      ? securityEngine.getStationToken(this.role)
+      : null;
+    if (!token) throw new Error('Race Control authentication required');
+    const response = await fetch(`${base}/api/race-export?room=${encodeURIComponent(this.roomId)}&format=${format}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Race export failed');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `f1cycle-${this.roomId}-${Date.now()}.${format}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  private updateSessionTimerLocally(action: 'START' | 'PAUSE' | 'RESET', durationMinutes?: number) {
+    if (!this.currentRaceState) return;
+
+    const nextState = { ...this.currentRaceState };
+    const currentSeconds = nextState.sessionRemainingSeconds || 0;
+    const defaultMinutes = nextState.session === 'Q1'
+      ? (nextState.qualifyingDurationMinutes || 15)
+      : (nextState.practiceDurationMinutes || 30);
+
+    if (action === 'START') {
+      const seconds = durationMinutes && durationMinutes > 0
+        ? durationMinutes * 60
+        : (currentSeconds > 0 ? currentSeconds : defaultMinutes * 60);
+      nextState.sessionRemainingSeconds = seconds;
+      nextState.sessionTotalSeconds = nextState.sessionTotalSeconds || seconds;
+      nextState.sessionTimerRunning = true;
+    } else if (action === 'PAUSE') {
+      nextState.sessionTimerRunning = false;
+    } else {
+      const seconds = (durationMinutes && durationMinutes > 0 ? durationMinutes : defaultMinutes) * 60;
+      nextState.sessionRemainingSeconds = seconds;
+      nextState.sessionTotalSeconds = seconds;
+      nextState.sessionTimerRunning = false;
+    }
+
+    this.currentRaceState = nextState;
+    this.notifyState();
   }
 
   advanceSession() {
@@ -949,10 +1055,25 @@ class RadioEngine {
     };
   }
 
+  onTeamJoinCode(cb: (data: { teamId: string; driverName: string; joinCode: string }) => void): () => void {
+    this.teamJoinCodeListeners.add(cb);
+    return () => this.teamJoinCodeListeners.delete(cb);
+  }
+
   private send(data: object) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     }
+  }
+
+  private flushPendingActions() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || (this.role !== 'timer' && this.role !== 'camera')) return;
+    try {
+      const pending = JSON.parse(localStorage.getItem(this.pendingActionKey) || '[]') as object[];
+      if (!pending.length) return;
+      pending.forEach((message) => this.send(message));
+      localStorage.removeItem(this.pendingActionKey);
+    } catch { /* local storage may be unavailable */ }
   }
 
   private cleanupWebRTC() {
@@ -1038,8 +1159,8 @@ class RadioEngine {
     }
   }
 
-  private notifyStatus() {
-    this.statusListeners.forEach(l => l(this.isConnected, this.isPeerOnline));
+  private notifyStatus(state: 'connected' | 'reconnecting' | 'offline' = this.isConnected ? 'connected' : 'offline') {
+    this.statusListeners.forEach(l => l(this.isConnected, this.isPeerOnline, state));
   }
 }
 
